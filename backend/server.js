@@ -1,87 +1,55 @@
 const express = require('express');
 const axios = require('axios');
-const cors = require('cors');
-const crypto = require('crypto');
+const app = express();
+const port = 5000; // Or use a service like Heroku
+
 require('dotenv').config();
 
-const app = express();
-app.use(cors());
 app.use(express.json());
 
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const PORT = process.env.PORT || 5000;
+// Endpoint to initiate STK Push
+app.post('/initiate-stk', async (req, res) => {
+  const { phone, amount } = req.body; // Get from frontend
+  const consumerKey = process.env.MPESA_CONSUMER_KEY;
+  const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
+  const shortCode = process.env.MPESA_SHORT_CODE; // Your business short code
+  const passkey = process.env.MPESA_PASSKEY;
 
-// Endpoint to initiate STK Push payment
-app.post('/api/initiate-payment', async (req, res) => {
-  const { email, amount, phone } = req.body;
+  // Generate access token
+  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+  const tokenResponse = await axios.get('https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials', {
+    headers: { Authorization: `Basic ${auth}` },
+  });
+  const accessToken = tokenResponse.data.access_token;
+
+  // STK Push payload
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, ''); // Format timestamp
+  const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64'); // Generate password
+
+  const stkPayload = {
+    BusinessShortCode: shortCode,
+    Password: password,
+    Timestamp: timestamp,
+    TransactionType: 'CustomerPayBillOnline',
+    Amount: amount,
+    PartyA: phone, // User's phone number, e.g., 2547xxxxxxxx
+    PartyB: shortCode,
+    PhoneNumber: phone,
+    CallBackURL: 'https://yourcallbackurl.com', // Your server endpoint for callbacks
+    AccountReference: 'Pinecoin Payment',
+    TransactionDesc: 'Payment for services',
+  };
 
   try {
-    const response = await axios.post(
-      'https://api.paystack.co/charge',
-      {
-        email,
-        amount: amount * 100, // Convert to kobo
-        mobile_money: {
-          phone,
-          provider: 'Mpesa',
-        },
-        currency: 'KES',
-        callback_url: 'http://localhost:3000/validate-payments', // Frontend callback URL
+    const stkResponse = await axios.post('https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest', stkPayload, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    res.json(response.data);
+    });
+    res.json(stkResponse.data); // Send response back to frontend
   } catch (error) {
-    console.error('Paystack API error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Payment initiation failed' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Webhook endpoint for Paystack events (deprecated - now using Vercel function)
-app.post('/api/paystack-webhook', (req, res) => {
-  const secret = process.env.PAYSTACK_SECRET_KEY;
-  const hash = crypto.createHmac('sha512', secret).update(JSON.stringify(req.body)).digest('hex');
-  if (hash !== req.headers['x-paystack-signature']) {
-    return res.status(400).send('Invalid signature');
-  }
-
-  const event = req.body;
-  if (event.event === 'charge.success') {
-    // Handle successful payment
-    console.log('Payment successful:', event.data);
-    // Update user subscription here
-  }
-
-  res.sendStatus(200);
-});
-
-// Endpoint to verify payment status
-app.get('/api/verify-payment/:reference', async (req, res) => {
-  const { reference } = req.params;
-
-  try {
-    const response = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-        },
-      }
-    );
-
-    res.json(response.data);
-  } catch (error) {
-    console.error('Verification error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Verification failed' });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
